@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import StringIO
 import boto
+import collections
 import grp
 import json
 import logging
@@ -15,9 +16,8 @@ import time
 
 from functools import *
 from optparse import OptionParser
-from traceback import format_exc
 from threading import Thread
-from Queue import Queue
+from traceback import format_exc
 
 
 # Default number of writer threads
@@ -35,7 +35,14 @@ MAX_FILE_SIZE = 4120 * 2**20
 # Default chunk size for multipart uploads in MB
 DEFAULT_CHUNK_SIZE = 256 * 2**20
 
-TIMEOUT = 5 * 60
+# How often to process new file events (seconds)
+FILE_CREATION_LOOP_TIME = 1
+
+# Walk the filesystem every N seconds
+WALK_FILESYSTEM_EVERY = 60 * 60
+
+# For ordered set
+KEY, PREV, NEXT = range(3)
 
 def get_log(debug=False):
     log = logging.getLogger('tablesnap')
@@ -55,6 +62,78 @@ def md5sum(key, filename):
     finally:
         f.close()
 
+
+class OrderedSet(collections.MutableSet):
+    """
+    Taken from http://code.activestate.com/recipes/576694/
+
+    Runs on Py2.6 or later (and runs on 3.0 or later without any
+    modifications).
+
+    Implementation based on a doubly linked link and an internal
+    dictionary. This design gives OrderedSet the same big-Oh running
+    times as regular sets including O(1) adds, removes, and lookups as
+    well as O(n) iteration."""
+
+    def __init__(self, iterable=None):
+        self.end = end = []
+        end += [None, end, end]         # sentinel node for doubly linked list
+        self.map = {}                   # key --> [key, prev, next]
+        if iterable is not None:
+            self |= iterable
+
+    def __len__(self):
+        return len(self.map)
+
+    def __contains__(self, key):
+        return key in self.map
+
+    def add(self, key):
+        if key not in self.map:
+            end = self.end
+            curr = end[PREV]
+            curr[NEXT] = end[PREV] = self.map[key] = [key, curr, end]
+
+    def discard(self, key):
+        if key in self.map:
+            key, prev, next = self.map.pop(key)
+            prev[NEXT] = next
+            next[PREV] = prev
+
+    def __iter__(self):
+        end = self.end
+        curr = end[NEXT]
+        while curr is not end:
+            yield curr[KEY]
+            curr = curr[NEXT]
+
+    def __reversed__(self):
+        end = self.end
+        curr = end[PREV]
+        while curr is not end:
+            yield curr[KEY]
+            curr = curr[PREV]
+
+    def pop(self, last=True):
+        if not self:
+            raise KeyError('set is empty')
+        key = next(reversed(self)) if last else next(iter(self))
+        self.discard(key)
+        return key
+
+    def __repr__(self):
+        if not self:
+            return '%s()' % (self.__class__.__name__,)
+        return '%s(%r)' % (self.__class__.__name__, list(self))
+
+    def __eq__(self, other):
+        if isinstance(other, OrderedSet):
+            return len(self) == len(other) and list(self) == list(other)
+        return set(self) == set(other)
+
+    def __del__(self):
+        self.clear()                    # remove circular references
+
 class UploadHandler(pyinotify.ProcessEvent):
     def my_init(self, log=None, threads=None, key=None, secret=None, bucket_name=None,
                 prefix=None, name=None, max_size=MAX_FILE_SIZE, chunk_size=DEFAULT_CHUNK_SIZE):
@@ -68,7 +147,7 @@ class UploadHandler(pyinotify.ProcessEvent):
         self.max_size = max_size
         self.chunk_size = chunk_size
 
-        self.fileq = Queue()
+        self.fileq = OrderedSet()
         for i in range(int(threads)):
             t = Thread(target=self.worker)
             t.daemon = True
@@ -80,7 +159,7 @@ class UploadHandler(pyinotify.ProcessEvent):
     def add_file(self, filename):
         if filename.find('-tmp') == -1:
             self.log.debug("adding %s to the upload queue" % filename)
-            self.fileq.put(filename)
+            self.fileq.add(filename)
 
     def get_bucket(self):
         # Reconnect to S3
@@ -107,7 +186,7 @@ class UploadHandler(pyinotify.ProcessEvent):
         bucket = self.get_bucket()
 
         while True:
-            f = self.fileq.get()
+            f = self.fileq.pop()
             keyname = self.build_keyname(f)
             try:
                 self.retry_with_new_bucket(upload_sstable)(bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
@@ -340,20 +419,20 @@ def main():
             get_log().critical('add_watch failed for %s, bailing out!' % (path))
             return 1
 
-    first_iteration = True
+    last_filesystem_walk = 0
+
     while True:
         try:
             ref_time = time.time()
+            notifier.read_events()
+            notifier.process_events()
 
-            if not first_iteration:
-                notifier.process_events()
-                if notifier.check_events():
-                    time.sleep(TIMEOUT - (time.time() - ref_time))
-                    notifier.read_events()
-                first_iteration = False
+            if (ref_time - last_filesystem_walk) > WALK_FILESYSTEM_EVERY:
+                # to catch failed backups
+                backup_files(handler, paths, options.recursive, log)
+                last_filesystem_walk = ref_time
 
-            # to catch failed backups
-            backup_files(handler, paths, options.recursive, log)
+            time.sleep(FILE_CREATION_LOOP_TIME - (time.time() - ref_time))
 
         except KeyboardInterrupt:
             log.debug('Pyinotify stops monitoring.')
