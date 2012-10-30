@@ -459,7 +459,7 @@ def main():
     while True:
         ref_time = time.time()
 
-        if notifier.check_events(timeout=0):
+        if notifier.check_events(timeout=1):
             notifier.read_events()
         notifier.process_events()
 
