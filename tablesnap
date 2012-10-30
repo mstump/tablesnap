@@ -343,10 +343,10 @@ def main():
     while True:
         try:
             ref_time = time.time()
-            self.process_events()
-            if self.check_events():
+            notifier.process_events()
+            if notifier.check_events():
                 time.sleep(TIMEOUT - (time.time() - ref_time))
-                self.read_events()
+                notifier.read_events()
 
             # to catch failed backups
             backup_files(handler, paths, options.recursive, log)
