@@ -429,15 +429,16 @@ def main():
 
     bucket = args[0]
     paths = args[1:]
+    log = get_log(options.verbose)
 
     if options.debug:
+        log.info("setting debug interrupt handler")
         signal.signal(signal.SIGUSR1, handle_pdb)
 
     # Check S3 credentials only. We reconnect per-thread to avoid any
     # potential thread-safety problems.
     s3 = boto.connect_s3(options.aws_key, options.aws_secret)
     bucket = s3.get_bucket(bucket)
-    log = get_log(options.verbose)
 
     handler = UploadHandler(log=log, threads=options.threads, key=options.aws_key,
                             secret=options.aws_secret, bucket_name=bucket,
@@ -457,7 +458,9 @@ def main():
 
     while True:
         ref_time = time.time()
-        notifier.read_events()
+
+        if notifier.check_events():
+            notifier.read_events()
         notifier.process_events()
 
         if (ref_time - last_filesystem_walk) > WALK_FILESYSTEM_EVERY:
