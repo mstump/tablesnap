@@ -36,7 +36,7 @@ MAX_FILE_SIZE = 4120 * 2**20
 DEFAULT_CHUNK_SIZE = 256 * 2**20
 
 # How often to process new file events (seconds)
-FILE_CREATION_LOOP_TIME = 1
+FILE_CREATION_LOOP_TIME = 60
 
 # Walk the filesystem every N seconds
 WALK_FILESYSTEM_EVERY = 60 * 60
@@ -459,7 +459,7 @@ def main():
     while True:
         ref_time = time.time()
 
-        if notifier.check_events():
+        if notifier.check_events(timeout=0):
             notifier.read_events()
         notifier.process_events()
 
