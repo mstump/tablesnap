@@ -33,6 +33,8 @@ MAX_FILE_SIZE = 4120 * 2**20
 # Default chunk size for multipart uploads in MB
 DEFAULT_CHUNK_SIZE = 256 * 2**20
 
+TIMEOUT = 5 * 60
+
 def get_log(debug=False):
     log = logging.getLogger('tablesnap')
     stderr = logging.StreamHandler()
@@ -41,7 +43,7 @@ def get_log(debug=False):
     if debug:
         log.setLevel(logging.DEBUG)
     else:
-        log.setLevel(logging.INFO)    
+        log.setLevel(logging.INFO)
     return log
 
 def md5sum(key, filename):
@@ -50,17 +52,6 @@ def md5sum(key, filename):
         return key.compute_md5(f)
     finally:
         f.close()
-
-def retry(f, retries=DEFAULT_RETRIES):
-    def wrapper(*args, **kwds):
-        while(True):
-            try:
-                return f(*args, **kwds)
-            except:
-                retries -= 1
-                if not retries > 0:
-                    raise
-    return wrapper
 
 class UploadHandler(pyinotify.ProcessEvent):
     def my_init(self, log=None, threads=None, key=None, secret=None, bucket_name=None,
@@ -105,7 +96,9 @@ class UploadHandler(pyinotify.ProcessEvent):
                 except:
                     count
                     if not count > 0:
-                        raise
+                        self.log.error("Exceeded retry attempts")
+                        self.log.error(traceback.format_exc())
+                        return None
         return wrapper
 
     def worker(self):
@@ -153,7 +146,7 @@ def key_exists(bucket, log, keyname, filename, stat):
                     'MD5 hashes differ, you should take a look. As immutable '
                     'files never change, one must assume the local file got '
                     'corrupted and the right version is the one in S3. Will '
-                    'skip this file to avoid future complications' % 
+                    'skip this file to avoid future complications' %
                     (filename, keyname, ))
         return True
 
@@ -340,15 +333,28 @@ def main():
     wm = pyinotify.WatchManager()
     notifier = pyinotify.Notifier(wm, handler)
     for path in paths:
-        ret = wm.add_watch(path, pyinotify.IN_MOVED_TO, rec=options.recursive,
-                           auto_add=options.auto_add)
+        ret = wm.add_watch(path, pyinotify.IN_MOVED_TO, rec=options.recursive, auto_add=options.auto_add)
         if ret[path] == -1:
             get_log().critical('add_watch failed for %s, bailing out!' % (path))
             return 1
 
-    backup_files(handler, paths, options.recursive, log)
-    log.info("Initial upload complete, waiting for new file creation")
-    notifier.loop()
+    while True:
+        try:
+            ref_time = time.time()
+            self.process_events()
+            if self.check_events():
+                time.sleep(TIMEOUT - (time.time() - ref_time))
+                self.read_events()
+
+            # to catch failed backups
+            backup_files(handler, paths, options.recursive, log)
+
+        except KeyboardInterrupt:
+            log.debug('Pyinotify stops monitoring.')
+            break
+
+    notifier.stop()
+
 
 if __name__ == '__main__':
     sys.exit(main())
