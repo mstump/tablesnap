@@ -340,13 +340,17 @@ def main():
             get_log().critical('add_watch failed for %s, bailing out!' % (path))
             return 1
 
+    first_iteration = True
     while True:
         try:
             ref_time = time.time()
-            notifier.process_events()
-            if notifier.check_events():
-                time.sleep(TIMEOUT - (time.time() - ref_time))
-                notifier.read_events()
+
+            if not first_iteration:
+                notifier.process_events()
+                if notifier.check_events():
+                    time.sleep(TIMEOUT - (time.time() - ref_time))
+                    notifier.read_events()
+                first_iteration = False
 
             # to catch failed backups
             backup_files(handler, paths, options.recursive, log)
