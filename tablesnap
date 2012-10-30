@@ -135,14 +135,14 @@ class OrderedSet(collections.MutableSet):
 
     def pop(self, last=True):
         try:
-            lock.acquire()
+            self.lock.acquire()
             if not self:
                 return None
             key = next(reversed(self)) if last else next(iter(self))
             self.discard(key)
             return key
         finally:
-            lock.release()
+            self.lock.release()
 
     def __repr__(self):
         if not self:
