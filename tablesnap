@@ -395,9 +395,14 @@ def backup_files(handler, paths, recurse, log):
     return 0
 
 
+def handle_pdb(sig, frame):
+    import pdb
+    pdb.Pdb().set_trace(frame)
+
 def main():
     parser = OptionParser(usage='%prog [options] <bucket> <path> [...]')
     parser.add_option('-v', '--verbose', dest='verbose', default=None)
+    parser.add_option('-d', '--debug', dest='debug', default=None)
     parser.add_option('-k', '--aws-key', dest='aws_key', default=None)
     parser.add_option('-s', '--aws-secret', dest='aws_secret', default=None)
     parser.add_option('-r', '--recursive', action='store_true', dest='recursive', default=False,
@@ -425,6 +430,9 @@ def main():
     bucket = args[0]
     paths = args[1:]
 
+    if options.debug:
+        signal.signal(signal.SIGUSR1, handle_pdb)
+
     # Check S3 credentials only. We reconnect per-thread to avoid any
     # potential thread-safety problems.
     s3 = boto.connect_s3(options.aws_key, options.aws_secret)
@@ -448,22 +456,18 @@ def main():
     last_filesystem_walk = 0
 
     while True:
-        try:
-            ref_time = time.time()
-            notifier.read_events()
-            notifier.process_events()
+        ref_time = time.time()
+        notifier.read_events()
+        notifier.process_events()
 
-            if (ref_time - last_filesystem_walk) > WALK_FILESYSTEM_EVERY:
-                # to catch failed backups
-                backup_files(handler, paths, options.recursive, log)
-                last_filesystem_walk = ref_time
+        if (ref_time - last_filesystem_walk) > WALK_FILESYSTEM_EVERY:
+            # to catch failed backups
+            backup_files(handler, paths, options.recursive, log)
+            last_filesystem_walk = ref_time
 
-            time.sleep(FILE_CREATION_LOOP_TIME - (time.time() - ref_time))
+        time.sleep(FILE_CREATION_LOOP_TIME - (time.time() - ref_time))
 
-        except KeyboardInterrupt:
-            log.debug('Pyinotify stops monitoring.')
-            break
-
+    log.debug('Pyinotify stops monitoring.')
     notifier.stop()
 
 
