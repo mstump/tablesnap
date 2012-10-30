@@ -87,37 +87,37 @@ class OrderedSet(collections.MutableSet):
 
     def __len__(self):
         try:
-            lock.acquire()
+            self.lock.acquire()
             return len(self.map)
         finally:
-            lock.release()
+            self.lock.release()
 
     def __contains__(self, key):
         try:
-            lock.acquire()
+            self.lock.acquire()
             return key in self.map
         finally:
-            lock.release()
+            self.lock.release()
 
     def add(self, key):
         try:
-            lock.acquire()
+            self.lock.acquire()
             if key not in self.map:
                 end = self.end
                 curr = end[PREV]
                 curr[NEXT] = end[PREV] = self.map[key] = [key, curr, end]
         finally:
-            lock.release()
+            self.lock.release()
 
     def discard(self, key):
         try:
-            lock.acquire()
+            self.lock.acquire()
             if key in self.map:
                 key, prev, next = self.map.pop(key)
                 prev[NEXT] = next
                 next[PREV] = prev
         finally:
-            lock.release()
+            self.lock.release()
 
     def __iter__(self):
         end = self.end
@@ -137,7 +137,7 @@ class OrderedSet(collections.MutableSet):
         try:
             lock.acquire()
             if not self:
-                raise KeyError('set is empty')
+                return None
             key = next(reversed(self)) if last else next(iter(self))
             self.discard(key)
             return key
@@ -213,8 +213,8 @@ class UploadHandler(pyinotify.ProcessEvent):
         bucket = self.get_bucket()
 
         while True:
-            if len(self.fileq) > 0:
-                f = self.fileq.pop() # dictionary fetches are atomic
+            f = self.fileq.pop() # dictionary fetches are atomic
+            if f:
                 keyname = self.build_keyname(f)
                 try:
                     self.retry_with_new_bucket(upload_sstable)(bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
