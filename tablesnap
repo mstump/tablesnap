@@ -16,7 +16,7 @@ import time
 
 from functools import *
 from optparse import OptionParser
-from threading import Thread
+from threading import *
 from traceback import format_exc
 
 
@@ -67,6 +67,8 @@ class OrderedSet(collections.MutableSet):
     """
     Taken from http://code.activestate.com/recipes/576694/
 
+    I made it thread safe enough for my purposes
+
     Runs on Py2.6 or later (and runs on 3.0 or later without any
     modifications).
 
@@ -76,6 +78,7 @@ class OrderedSet(collections.MutableSet):
     well as O(n) iteration."""
 
     def __init__(self, iterable=None):
+        self.lock = Lock()
         self.end = end = []
         end += [None, end, end]         # sentinel node for doubly linked list
         self.map = {}                   # key --> [key, prev, next]
@@ -83,22 +86,38 @@ class OrderedSet(collections.MutableSet):
             self |= iterable
 
     def __len__(self):
-        return len(self.map)
+        try:
+            lock.acquire()
+            return len(self.map)
+        finally:
+            lock.release()
 
     def __contains__(self, key):
-        return key in self.map
+        try:
+            lock.acquire()
+            return key in self.map
+        finally:
+            lock.release()
 
     def add(self, key):
-        if key not in self.map:
-            end = self.end
-            curr = end[PREV]
-            curr[NEXT] = end[PREV] = self.map[key] = [key, curr, end]
+        try:
+            lock.acquire()
+            if key not in self.map:
+                end = self.end
+                curr = end[PREV]
+                curr[NEXT] = end[PREV] = self.map[key] = [key, curr, end]
+        finally:
+            lock.release()
 
     def discard(self, key):
-        if key in self.map:
-            key, prev, next = self.map.pop(key)
-            prev[NEXT] = next
-            next[PREV] = prev
+        try:
+            lock.acquire()
+            if key in self.map:
+                key, prev, next = self.map.pop(key)
+                prev[NEXT] = next
+                next[PREV] = prev
+        finally:
+            lock.release()
 
     def __iter__(self):
         end = self.end
@@ -115,11 +134,15 @@ class OrderedSet(collections.MutableSet):
             curr = curr[PREV]
 
     def pop(self, last=True):
-        if not self:
-            raise KeyError('set is empty')
-        key = next(reversed(self)) if last else next(iter(self))
-        self.discard(key)
-        return key
+        try:
+            lock.acquire()
+            if not self:
+                raise KeyError('set is empty')
+            key = next(reversed(self)) if last else next(iter(self))
+            self.discard(key)
+            return key
+        finally:
+            lock.release()
 
     def __repr__(self):
         if not self:
@@ -132,7 +155,11 @@ class OrderedSet(collections.MutableSet):
         return set(self) == set(other)
 
     def __del__(self):
-        self.clear()                    # remove circular references
+        try:
+            lock.acquire()
+            self.clear()                    # remove circular references
+        finally:
+            lock.release()
 
 class UploadHandler(pyinotify.ProcessEvent):
     def my_init(self, log=None, threads=None, key=None, secret=None, bucket_name=None,
@@ -178,7 +205,7 @@ class UploadHandler(pyinotify.ProcessEvent):
                     count
                     if not count > 0:
                         self.log.error("Exceeded retry attempts")
-                        self.log.error(traceback.format_exc())
+                        self.log.error(format_exc())
                         return None
         return wrapper
 
@@ -186,15 +213,14 @@ class UploadHandler(pyinotify.ProcessEvent):
         bucket = self.get_bucket()
 
         while True:
-            f = self.fileq.pop()
-            keyname = self.build_keyname(f)
-            try:
-                self.retry_with_new_bucket(upload_sstable)(bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
-            except:
-                self.log.critical("Failed uploading %s. Aborting.\n%s" % (f, format_exc()))
-                os.kill(os.getpid(), signal.SIGKILL) # Brute force kill self
-
-            self.fileq.task_done()
+            if len(self.fileq) > 0:
+                f = self.fileq.pop() # dictionary fetches are atomic
+                keyname = self.build_keyname(f)
+                try:
+                    self.retry_with_new_bucket(upload_sstable)(bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
+                except:
+                    self.log.critical("Failed uploading %s. Aborting.\n%s" % (f, format_exc()))
+                    os.kill(os.getpid(), signal.SIGKILL) # Brute force kill self
 
     def process_IN_MOVED_TO(self, event):
         self.add_file(event.pathname)
