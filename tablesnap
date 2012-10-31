@@ -14,6 +14,7 @@ import socket
 import sys
 import time
 
+from Queue import Queue
 from functools import *
 from optparse import OptionParser
 from threading import *
@@ -63,107 +64,13 @@ def md5sum(key, filename):
         f.close()
 
 
-class OrderedSet(collections.MutableSet):
-    """
-    Taken from http://code.activestate.com/recipes/576694/
-
-    I made it thread safe enough for my purposes
-
-    Runs on Py2.6 or later (and runs on 3.0 or later without any
-    modifications).
-
-    Implementation based on a doubly linked link and an internal
-    dictionary. This design gives OrderedSet the same big-Oh running
-    times as regular sets including O(1) adds, removes, and lookups as
-    well as O(n) iteration."""
-
-    def __init__(self, iterable=None):
-        self.lock = Lock()
-        self.end = end = []
-        end += [None, end, end]         # sentinel node for doubly linked list
-        self.map = {}                   # key --> [key, prev, next]
-        if iterable is not None:
-            self |= iterable
-
-    def __len__(self):
-        try:
-            self.lock.acquire()
-            return len(self.map)
-        finally:
-            self.lock.release()
-
-    def __contains__(self, key):
-        try:
-            self.lock.acquire()
-            return key in self.map
-        finally:
-            self.lock.release()
-
-    def add(self, key):
-        try:
-            self.lock.acquire()
-            if key not in self.map:
-                end = self.end
-                curr = end[PREV]
-                curr[NEXT] = end[PREV] = self.map[key] = [key, curr, end]
-        finally:
-            self.lock.release()
-
-    def discard(self, key):
-        try:
-            self.lock.acquire()
-            if key in self.map:
-                key, prev, next = self.map.pop(key)
-                prev[NEXT] = next
-                next[PREV] = prev
-        finally:
-            self.lock.release()
-
-    def __iter__(self):
-        end = self.end
-        curr = end[NEXT]
-        while curr is not end:
-            yield curr[KEY]
-            curr = curr[NEXT]
-
-    def __reversed__(self):
-        end = self.end
-        curr = end[PREV]
-        while curr is not end:
-            yield curr[KEY]
-            curr = curr[PREV]
-
-    def pop(self, last=True):
-        try:
-            self.lock.acquire()
-            if not self:
-                return None
-            key = next(reversed(self)) if last else next(iter(self))
-            self.discard(key)
-            return key
-        finally:
-            self.lock.release()
-
-    def __repr__(self):
-        if not self:
-            return '%s()' % (self.__class__.__name__,)
-        return '%s(%r)' % (self.__class__.__name__, list(self))
-
-    def __eq__(self, other):
-        if isinstance(other, OrderedSet):
-            return len(self) == len(other) and list(self) == list(other)
-        return set(self) == set(other)
-
-    def __del__(self):
-        try:
-            lock.acquire()
-            self.clear()                    # remove circular references
-        finally:
-            lock.release()
-
 class UploadHandler(pyinotify.ProcessEvent):
+
     def my_init(self, log=None, threads=None, key=None, secret=None, bucket_name=None,
                 prefix=None, name=None, max_size=MAX_FILE_SIZE, chunk_size=DEFAULT_CHUNK_SIZE):
+
+        log.critical("my_init")
+
         self.key = key
         self.secret = secret
         self.bucket_name = bucket_name
@@ -174,8 +81,9 @@ class UploadHandler(pyinotify.ProcessEvent):
         self.max_size = max_size
         self.chunk_size = chunk_size
 
-        self.fileq = OrderedSet()
+        self.fileq = Queue()
         for i in range(int(threads)):
+            self.log.debug("starting thread %s" % i)
             t = Thread(target=self.worker)
             t.daemon = True
             t.start()
@@ -186,41 +94,41 @@ class UploadHandler(pyinotify.ProcessEvent):
     def add_file(self, filename):
         if filename.find('-tmp') == -1:
             self.log.debug("adding %s to the upload queue" % filename)
-            self.fileq.add(filename)
+            self.fileq.put(filename)
 
     def get_bucket(self):
         # Reconnect to S3
         s3 = boto.connect_s3(self.key, self.secret)
         return s3.get_bucket(self.bucket_name)
 
-    def retry_with_new_bucket(self, f):
+    def retry_with_new_bucket(self, f, *args, **kwds):
         count = self.retries
+        args = list(args)
 
-        def wrapper(*args, **kwds):
-            while(True):
-                try:
-                    args[0] = self.get_bucket()
-                    return f(*args, **kwds)
-                except:
-                    count
-                    if not count > 0:
-                        self.log.error("Exceeded retry attempts")
-                        self.log.error(format_exc())
-                        return None
-        return wrapper
+        while True:
+            try:
+                args[0] = self.get_bucket()
+                return f(*args, **kwds)
+            except:
+                count -= 1
+                if not count > 0:
+                    self.log.error("Exceeded retry attempts")
+                    self.log.error(format_exc())
+                    return None
 
     def worker(self):
         bucket = self.get_bucket()
 
         while True:
-            f = self.fileq.pop() # dictionary fetches are atomic
-            if f:
-                keyname = self.build_keyname(f)
-                try:
-                    self.retry_with_new_bucket(upload_sstable)(bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
-                except:
-                    self.log.critical("Failed uploading %s. Aborting.\n%s" % (f, format_exc()))
-                    os.kill(os.getpid(), signal.SIGKILL) # Brute force kill self
+            f = self.fileq.get()
+            self.log.debug("Pulled file from queue: %s" % f)
+            keyname = self.build_keyname(f)
+            try:
+                self.retry_with_new_bucket(upload_sstable, bucket, self.log, keyname, f, chunk_size=self.chunk_size, max_size=self.max_size)
+            except:
+                self.log.critical("Failed uploading %s. Aborting.\n%s" % (f, format_exc()))
+                os.kill(os.getpid(), signal.SIGKILL) # Brute force kill self
+            self.fileq.task_done()
 
     def process_IN_MOVED_TO(self, event):
         self.add_file(event.pathname)
@@ -401,8 +309,9 @@ def handle_pdb(sig, frame):
 
 def main():
     parser = OptionParser(usage='%prog [options] <bucket> <path> [...]')
-    parser.add_option('-v', '--verbose', dest='verbose', default=None)
-    parser.add_option('-d', '--debug', dest='debug', default=None)
+    parser.add_option('-1', dest='one_loop', action="store_true", default=False)
+    parser.add_option('-v', '--verbose', dest='verbose', action="store_true", default=False)
+    parser.add_option('-d', '--debug', dest='debug', action="store_true", default=False)
     parser.add_option('-k', '--aws-key', dest='aws_key', default=None)
     parser.add_option('-s', '--aws-secret', dest='aws_secret', default=None)
     parser.add_option('-r', '--recursive', action='store_true', dest='recursive', default=False,
@@ -468,10 +377,14 @@ def main():
             backup_files(handler, paths, options.recursive, log)
             last_filesystem_walk = ref_time
 
+        if options.one_loop:
+            break
+
         time.sleep(FILE_CREATION_LOOP_TIME - (time.time() - ref_time))
 
+
     log.debug('Pyinotify stops monitoring.')
-    notifier.stop()
+    # notifier.stop()
 
 
 if __name__ == '__main__':
